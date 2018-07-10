@@ -6,9 +6,9 @@ endif
 LIBIPT_LIB := ../processor-trace/lib
 LIBIPT_INCLUDE := ../processor-trace/libipt/include
 
-USER_OBJS := sptdump.o map.o fastdecode.o sptdecode.o dumpkcore.o \
+USER_OBJS := sptdump.o spttest.o map.o fastdecode.o sptdecode.o dumpkcore.o \
 	     elf.o symtab.o dtools.o kernel.o ptfeature.o dwarf.o
-USER_EXE := sptdump fastdecode sptdecode ptfeature # dumpkcore
+USER_EXE := sptdump spttest fastdecode sptdecode ptfeature # dumpkcore
 MAN := sptdump.man fastdecode.man sptdecode.man ptfeature.man sptcmd.man \
 	sptarchive.man
 
@@ -41,6 +41,8 @@ user: ${USER_EXE}
 
 sptdump: sptdump.o
 sptdump.o: sptdump.c simple-pt.h map.h
+spttest: spttest.o
+spttest.o: spttest.c simple-pt.h
 map.o: map.c map.h
 
 fastdecode: fastdecode.o map.o

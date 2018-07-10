@@ -413,10 +413,16 @@ static int start_pt(void)
 {
 	u64 val, oldval;
 
+	printk(KERN_INFO "start_pt is called\n");
+
 	if (pt_rdmsrl_safe(MSR_IA32_RTIT_CTL, &val) < 0)
 		return -1;
 
 	oldval = val;
+
+	printk(KERN_INFO "val    %llx\n", val);
+	printk(KERN_INFO "oldval %llx\n", oldval);
+
 	/* Disable trace for reconfiguration */
 	if (val & TRACE_EN)
 		pt_wrmsrl_safe(MSR_IA32_RTIT_CTL, val & ~TRACE_EN);
@@ -470,6 +476,78 @@ static int start_pt(void)
 	if (pt_wrmsrl_safe(MSR_IA32_RTIT_CTL, val) < 0)
 		return -1;
 	__this_cpu_write(pt_running, true);
+
+	printk(KERN_INFO "pt ctl has been written\n");
+	printk(KERN_INFO "val    %llx\n", val);
+	printk(KERN_INFO "oldval %llx\n", oldval);
+
+	return 0;
+}
+
+static int start_pt_with_ioctl(void)
+{
+	u64 val, oldval;
+
+	printk(KERN_INFO "start_pt_with_ioctl is called\n");
+
+	if (pt_rdmsrl_safe(MSR_IA32_RTIT_CTL, &val) < 0)
+		return -1;
+
+	oldval = val;
+	printk(KERN_INFO "val    %llx\n", val);
+	printk(KERN_INFO "oldval %llx\n", oldval);
+	/* Disable trace for reconfiguration */
+	if (val & TRACE_EN)
+		pt_wrmsrl_safe(MSR_IA32_RTIT_CTL, val & ~TRACE_EN);
+
+	/* Clear pt buffer if clear_on_start is set */
+	if (clear_on_start && !(val & TRACE_EN)) {
+		memset((void *)__this_cpu_read(pt_buffer_cpu), 0, PAGE_SIZE << pt_buffer_order);
+		init_mask_ptrs();
+		pt_wrmsrl_safe(MSR_IA32_RTIT_STATUS, 0ULL);
+	}
+
+	val &= ~(TSC_EN | CTL_OS | CTL_USER | CR3_FILTER | DIS_RETC | TO_PA |
+		 CYC_EN | TRACE_EN | BRANCH_EN | CYC_EN | MTC_EN |
+		 MTC_EN | MTC_MASK | CYC_MASK | PSB_MASK | ADDR0_MASK | ADDR1_MASK);
+	val |= TRACE_EN;
+	/* Otherwise wait for start trigger */
+	if (!disable_branch)
+		val |= BRANCH_EN;
+	if (!single_range)
+		val |= TO_PA;
+	if (tsc_en)
+		val |= TSC_EN;
+	/* Always enable CTL_USER and CR3_FILTER if pt is enabled with IOCTL */
+	val |= CTL_OS;
+	val |= CR3_FILTER;
+	if (dis_retc)
+		val |= DIS_RETC;
+	if (cyc_thresh && ((1U << (cyc_thresh-1)) & cyc_thresh_mask))
+		val |= ((cyc_thresh - 1) << 19) | CYC_EN;
+	if (mtc_freq && ((1U << (mtc_freq-1)) & mtc_freq_mask))
+		val |= ((mtc_freq - 1) << 14) | MTC_EN;
+	if (psb_freq && ((1U << (psb_freq-1)) & psb_freq_mask))
+		val |= (psb_freq - 1) << 24;
+	if (addr0_cfg && (addr0_cfg <= addr_cfg_max) && addr_range_num >= 1) {
+		val |= ((u64)addr0_cfg << ADDR0_SHIFT);
+		pt_wrmsrl_safe(MSR_IA32_ADDR0_START, addr0_start);
+		pt_wrmsrl_safe(MSR_IA32_ADDR0_END, addr0_end);
+	}
+	if (addr1_cfg && (addr1_cfg <= addr_cfg_max) && addr_range_num >= 2) {
+		val |= ((u64)addr1_cfg << ADDR1_SHIFT);
+		pt_wrmsrl_safe(MSR_IA32_ADDR1_START, addr1_start);
+		pt_wrmsrl_safe(MSR_IA32_ADDR1_END, addr1_end);
+	}
+
+	if (pt_wrmsrl_safe(MSR_IA32_RTIT_CTL, val) < 0)
+		return -1;
+	__this_cpu_write(pt_running, true);
+
+	printk(KERN_INFO "pt ctl has been written\n");
+	printk(KERN_INFO "val    %llx\n", val);
+	printk(KERN_INFO "oldval %llx\n", oldval);
+
 	return 0;
 }
 
@@ -477,6 +555,13 @@ static void do_start_pt(void *arg)
 {
 	int cpu = smp_processor_id();
 	if (start_pt() < 0)
+		pr_err("cpu %d, RTIT_CTL enable failed\n", cpu);
+}
+
+static void do_start_pt_with_ioctl(void *arg)
+{
+	int cpu = smp_processor_id();
+	if (start_pt_with_ioctl() < 0)
 		pr_err("cpu %d, RTIT_CTL enable failed\n", cpu);
 }
 
@@ -522,6 +607,26 @@ static void restart(void)
 
 	mutex_lock(&restart_mutex);
 	on_each_cpu(start ? do_start_pt : stop_pt, NULL, 1);
+	mutex_unlock(&restart_mutex);
+}
+
+static void start_with_ioctl(void)
+{
+	if (!initialized)
+		return;
+
+	mutex_lock(&restart_mutex);
+	on_each_cpu(do_start_pt_with_ioctl, NULL, 1);
+	mutex_unlock(&restart_mutex);
+}
+
+static void stop_with_ioctl(void)
+{
+	if (!initialized)
+		return;
+
+	mutex_lock(&restart_mutex);
+	on_each_cpu(stop_pt, NULL, 1);
 	mutex_unlock(&restart_mutex);
 }
 
@@ -724,6 +829,25 @@ static int simple_pt_mmap(struct file *file, struct vm_area_struct *vma)
 	return err;
 }
 
+static void set_cr3_filter(void *arg)
+{
+	u64 val;
+	u64 new_cr3;
+
+	if (pt_rdmsrl_safe(MSR_IA32_RTIT_CTL, &val) < 0)
+		return;
+	if ((val & TRACE_EN) && pt_wrmsrl_safe(MSR_IA32_RTIT_CTL, val & ~TRACE_EN) < 0)
+		return;
+	if (pt_wrmsrl_safe(MSR_IA32_CR3_MATCH, *(u64 *)arg) < 0)
+		pr_err("cpu %d, cannot set cr3 filter\n", smp_processor_id());
+	if ((val & TRACE_EN) && pt_wrmsrl_safe(MSR_IA32_RTIT_CTL, val) < 0)
+		return;
+	printk(KERN_INFO "set cr3 match %llx\n", *(u64 *)arg);
+	pt_rdmsrl_safe(MSR_IA32_CR3_MATCH, &new_cr3);
+	printk(KERN_INFO "read cr3 match %llx\n", new_cr3);
+}
+
+
 static long simple_pt_ioctl(struct file *file, unsigned int cmd,
 			    unsigned long arg)
 {
@@ -753,6 +877,21 @@ static long simple_pt_ioctl(struct file *file, unsigned int cmd,
 			ret = put_user(offset, (int *)arg);
 		return ret;
 	}
+	case SIMPLE_PT_SET_CR3_FILTER: {
+		u64 cr3 = arg;
+		mutex_lock(&restart_mutex);
+		on_each_cpu(set_cr3_filter, &cr3, 1);
+		mutex_unlock(&restart_mutex);
+		return 0;
+	}
+	case SIMPLE_PT_TRACE_START: {
+		start_with_ioctl();
+		return 0;
+	}
+	case SIMPLE_PT_TRACE_STOP: {
+		stop_with_ioctl();
+		return 0;
+	}
 	default:
 		return -ENOTTY;
 	}
@@ -770,20 +909,6 @@ static struct miscdevice simple_pt_miscdev = {
 	"simple-pt",
 	&simple_pt_fops
 };
-
-static void set_cr3_filter(void *arg)
-{
-	u64 val;
-
-	if (pt_rdmsrl_safe(MSR_IA32_RTIT_CTL, &val) < 0)
-		return;
-	if ((val & TRACE_EN) && pt_wrmsrl_safe(MSR_IA32_RTIT_CTL, val & ~TRACE_EN) < 0)
-		return;
-	if (pt_wrmsrl_safe(MSR_IA32_CR3_MATCH, *(u64 *)arg) < 0)
-		pr_err("cpu %d, cannot set cr3 filter\n", smp_processor_id());
-	if ((val & TRACE_EN) && pt_wrmsrl_safe(MSR_IA32_RTIT_CTL, val) < 0)
-		return;
-}
 
 static bool match_comm(void)
 {
