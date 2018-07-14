@@ -847,7 +847,7 @@ static void set_cr3_filter(void *arg)
 	printk(KERN_INFO "read cr3 match %llx\n", new_cr3);
 }
 
-
+#define MSR_IA32_VMX_MISC               0x00000485
 static long simple_pt_ioctl(struct file *file, unsigned int cmd,
 			    unsigned long arg)
 {
@@ -891,6 +891,15 @@ static long simple_pt_ioctl(struct file *file, unsigned int cmd,
 	case SIMPLE_PT_TRACE_STOP: {
 		stop_with_ioctl();
 		return 0;
+		/*
+		u64 val;
+		if (pt_rdmsrl_safe(MSR_IA32_VMX_MISC, &val) >= 0) {
+			printk(KERN_INFO "IA32_VMX_MISC: %llx\n", val);
+			if (val & BIT_ULL(14))
+				printk(KERN_INFO "TraceEn can be set in VMX operation\n");
+		}
+		return 0;
+		*/
 	}
 	default:
 		return -ENOTTY;
