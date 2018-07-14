@@ -145,7 +145,7 @@ fi
 
 COMM=${COMM:-}
 KERNEL=${KERNEL:-1}
-TRACE=${TRACE:-0}
+TRACE=${TRACE:-1}
 USERMODE=${USERMODE:-1}
 DISRETC=${DISRETC:-0}
 DRIVER=${DRIVER:-}
@@ -248,6 +248,8 @@ fi
 if [ "$PRINT_REGS" != 0 ] ; then
 	ptregs
 fi
+echo $TRACE
+echo $KEEP
 echo 0 > $C/start
 if [ -z "$KEEP" ] ; then
 	echo 0 > $T/events/pttp/exec_cr3/enable
